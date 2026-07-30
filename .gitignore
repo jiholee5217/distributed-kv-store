@@ -1,0 +1,13 @@
+# Binaries
+/bin/
+/kvnode
+
+# Test and coverage output
+*.out
+coverage.*
+
+# Editors and operating systems
+.DS_Store
+.idea/
+.vscode/
+*.swp
