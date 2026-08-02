@@ -24,4 +24,6 @@ jobs:
       - name: Test with race detector
         run: go test -race ./...
       - name: Build
-        run: go build ./cmd/kvnode
+        run: go build ./...
+      - name: Validate Docker Compose
+        run: docker compose config --quiet

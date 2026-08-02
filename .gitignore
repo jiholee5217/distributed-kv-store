@@ -1,10 +1,13 @@
 # Binaries
 /bin/
 /kvnode
+/kvbench
+/data/
 
 # Test and coverage output
 *.out
 coverage.*
+*.test
 
 # Editors and operating systems
 .DS_Store
