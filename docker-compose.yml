@@ -1,0 +1,72 @@
+name: distributed-kv-store
+
+x-node: &node
+  build: .
+  restart: unless-stopped
+  networks: [raft]
+
+services:
+  node-1:
+    <<: *node
+    command:
+      - -id=node-1
+      - -listen=:8080
+      - -advertise=http://node-1:8080
+      - -members=node-2=http://node-2:8080,node-3=http://node-3:8080,node-4=http://node-4:8080,node-5=http://node-5:8080
+      - -data-dir=/data
+    ports: ["8081:8080"]
+    volumes: [node-1-data:/data]
+
+  node-2:
+    <<: *node
+    command:
+      - -id=node-2
+      - -listen=:8080
+      - -advertise=http://node-2:8080
+      - -members=node-1=http://node-1:8080,node-3=http://node-3:8080,node-4=http://node-4:8080,node-5=http://node-5:8080
+      - -data-dir=/data
+    ports: ["8082:8080"]
+    volumes: [node-2-data:/data]
+
+  node-3:
+    <<: *node
+    command:
+      - -id=node-3
+      - -listen=:8080
+      - -advertise=http://node-3:8080
+      - -members=node-1=http://node-1:8080,node-2=http://node-2:8080,node-4=http://node-4:8080,node-5=http://node-5:8080
+      - -data-dir=/data
+    ports: ["8083:8080"]
+    volumes: [node-3-data:/data]
+
+  node-4:
+    <<: *node
+    command:
+      - -id=node-4
+      - -listen=:8080
+      - -advertise=http://node-4:8080
+      - -members=node-1=http://node-1:8080,node-2=http://node-2:8080,node-3=http://node-3:8080,node-5=http://node-5:8080
+      - -data-dir=/data
+    ports: ["8084:8080"]
+    volumes: [node-4-data:/data]
+
+  node-5:
+    <<: *node
+    command:
+      - -id=node-5
+      - -listen=:8080
+      - -advertise=http://node-5:8080
+      - -members=node-1=http://node-1:8080,node-2=http://node-2:8080,node-3=http://node-3:8080,node-4=http://node-4:8080
+      - -data-dir=/data
+    ports: ["8085:8080"]
+    volumes: [node-5-data:/data]
+
+networks:
+  raft:
+
+volumes:
+  node-1-data:
+  node-2-data:
+  node-3-data:
+  node-4-data:
+  node-5-data:
