@@ -1,10 +1,10 @@
-# Project overview
+# Project overview for reviewers
 
 ## One-sentence version
 
-This project is a five-node, persistent key-value database that uses Raft to
-keep an ordered command log consistent, remain available through two node
-failures, and recover committed data after restarts.
+This project is a from-scratch five-node Raft database that demonstrates leader
+election, majority-backed writes, linearizable reads, persistent restart recovery,
+quorum-loss safety, and measurable leader-failure behavior.
 
 ## Sixty-second explanation
 
@@ -13,61 +13,70 @@ elects one server as leader; followers remember that leader and forward client
 traffic to it. For a write, the leader appends a command to its persistent log
 and sends the missing suffix to every follower. Once three of five nodes have
 stored the entry, the leader marks it committed, applies it to the in-memory
-key-value state machine, and responds to the client. Followers learn the commit
-index from later heartbeats and apply the same operations in the same order.
+key-value state machine, and responds. Followers learn the commit index from
+later heartbeats and apply the same operations in the same order.
 
-If the leader crashes, heartbeats stop. After randomized election timeouts, a
-follower becomes a candidate, increments the term, and requests votes. A
-majority elects a replacement whose log is sufficiently up to date. Requests
-resume after the new leader begins heartbeats. When a crashed node restarts, it
-loads its persisted log and catches up from the current leader.
+If the leader crashes, requests can fail while there is no leader. Randomized
+timeouts trigger a new election, and only a candidate with a sufficiently
+up-to-date log can receive votes. The replacement resumes commits once it reaches
+a majority. A restarted node loads its persisted state and reconciles its suffix
+with the current leader.
 
-## Major parts
+## Five-minute walkthrough
 
-1. **Consensus engine** — roles, terms, randomized elections, voting, log
-   matching, replication progress, and majority commit decisions.
-2. **Persistent log** — durable term, vote, entries, and commit index with
-   atomic replacement and restart replay.
-3. **Key-value state machine** — deterministic application of committed puts,
-   deletes, and no-op read barriers.
-4. **HTTP transport** — public CRUD API, one-hop follower forwarding, and
-   internal `RequestVote`/`AppendEntries` RPCs.
-5. **Five-node environment** — Docker network, isolated processes, and one
-   durable volume per node.
-6. **Verification** — race tests, a real five-server integration test, leader
-   crash injection, persistence restart checks, and a concurrent benchmark.
+1. Start with the [diagram gallery](diagrams.md) for the system, write, election,
+   quorum, and recovery paths.
+2. Read [architecture](architecture.md) for the safety invariants implemented in
+   `RequestVote`, `AppendEntries`, and commit advancement.
+3. Inspect [`internal/raft/node.go`](../internal/raft/node.go) for the consensus
+   engine and [`internal/raft/http.go`](../internal/raft/http.go) for transport.
+4. Review [client semantics](client-semantics.md) for linearizable reads, 503s,
+   timeouts, and why retries are not exactly once.
+5. Review the [recorded results](results/2026-08-15-five-node.md) and reproduce
+   them with the scripts in [`scripts`](../scripts).
 
-## Consistency and availability
+## Engineering decisions worth discussing
 
-- Writes are acknowledged only after majority persistence and leader apply.
-- Reads use a committed no-op barrier, so an isolated old leader cannot serve a
-  stale value as current.
-- A five-node cluster can tolerate two crash-stop failures and still form a
-  majority.
-- With fewer than three mutually reachable nodes, the system sacrifices
-  availability rather than accepting divergent writes.
+| Decision | Reason | Tradeoff |
+| --- | --- | --- |
+| Implement Raft directly | Makes terms, votes, conflicts, and commit rules inspectable | Educational implementation lacks production hardening |
+| Require three of five replicas | Survives two crash-stop failures without divergent commits | Minority partitions reject writes and linearizable reads |
+| Commit a barrier for every GET | Simple proof that the leader still reaches a majority | Reads pay replication and persistence latency and grow the log |
+| Rewrite a JSON state file atomically | Recovery format is easy to inspect and test | Cost rises with every log entry; no WAL checksums or compaction |
+| Forward through any node | Simple client endpoint behavior | Adds a proxy hop and exposes a short 503 window during elections |
+| Export bounded-cardinality metrics | Elections and replication are observable without key-level labels | Metrics do not replace tracing or durable audit events |
 
-## What makes the project technically interesting
+## Evidence ledger
 
-The hard part is not the map that stores values. It is maintaining invariants
-while elections, retries, conflicting log suffixes, crashes, and concurrent
-client requests happen:
+| Invariant or behavior | Evidence |
+| --- | --- |
+| One elected leader and majority-backed replication | Five-node HTTP integration test under `go test -race` |
+| A minority cannot commit | Same test removes three nodes and verifies `commitIndex` does not advance |
+| Stale candidates cannot win | `TestRequestVoteRejectsStaleCandidate` |
+| Conflicting suffixes converge | `TestAppendEntriesReplacesConflictingSuffix` |
+| Committed state replays | Memory/file restart tests and Docker restart catch-up demo |
+| Operational signals are exported | Metrics unit test, five Prometheus targets, provisioned Grafana dashboard |
+| Failure cost is measured | No-load and under-load leader-stop experiments with recorded recovery windows |
 
-- a node votes at most once per term;
-- only a candidate with an up-to-date log can win;
-- a follower accepts entries only after a matching prefix;
-- only majority-replicated current-term entries advance the leader's commit
-  index; and
-- state-machine commands apply once, in committed log order.
+## Measured behavior
 
-## Current engineering baseline
+The controlled 32-client mixed workload completed 4,174 operations in 15 seconds
+through a follower with zero errors. Stopping the leader without load produced a
+replacement in 763 ms. During saturated write load, replacement took 2.144
+seconds and clients observed a temporary 32.8% error rate; after restart, all five
+commit indexes converged.
 
-The current persistence layer rewrites and `fsync`s the complete JSON log for
-clarity, and every read commits a log barrier for simple linearizability. These
-choices are correct but deliberately expensive. The benchmark harness makes
-that cost visible and creates a concrete path to a segmented WAL, batching,
-snapshots, and an optimized `ReadIndex` implementation.
+Those numbers are useful precisely because they expose the current design:
+consensus safety holds, but full-log rewrites and missing client retries make the
+election window visible. They are not production database claims.
 
-Performance numbers should be reported only with the exact commit, workload,
-machine, duration, and raw benchmark output. Hypothetical résumé numbers are
-not project results.
+## Interview prompts
+
+- Why can a five-node cluster lose two nodes but not three?
+- Why may a successful-looking local append still be unsafe to acknowledge?
+- How does the up-to-date-log voting rule protect committed entries?
+- Why does Raft restrict commit advancement for older-term entries?
+- What can a client infer after receiving 503 versus losing a connection?
+- Why does a read barrier prevent an isolated old leader from serving stale data?
+- Which metrics reveal split votes, lagging followers, or storage bottlenecks?
+- What changes first: segmented WAL, snapshots, `ReadIndex`, or Multi-Raft, and why?
