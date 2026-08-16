@@ -1,103 +1,104 @@
 # Distributed Key-Value Store
 
-A from-scratch, persistent key-value database built around the Raft consensus
-algorithm. Five Go processes elect one leader, replicate an ordered command log,
-and apply writes only after a majority has persisted them.
+I built this project to learn what consensus looks like beyond the textbook
+pseudocode. It is a persistent key-value database backed by a five-node Raft
+cluster, written from scratch in Go.
 
-This repository is the storage foundation for the
-[Fault-Tolerant Distributed LLM Inference Platform](https://github.com/jiholee5217/distributed-llm-inference-platform).
-Together they tell one engineering story: implement a consensus primitive, then
-use it as the strongly consistent control-plane database for a larger system.
+You can send a request to any node. Followers forward writes to the current
+leader, the leader replicates each command, and the value becomes visible only
+after a majority has persisted it. The cluster can lose two of its five nodes
+and still make progress.
 
-> **Status:** The educational Raft baseline implements elections, replicated
-> logs, majority commits, linearizable reads, persistent restart recovery,
-> five-node fault injection, Prometheus/Grafana observability, and reproducible
-> benchmarks. Snapshotting, a segmented WAL, authenticated transport, dynamic
-> membership, and horizontal sharding remain roadmap work.
+This project also became the storage layer for my
+[Distributed LLM Inference Platform](https://github.com/jiholee5217/distributed-llm-inference-platform),
+where Raft holds durable control-plane state for a larger distributed system.
 
-## 60-second project tour
+## The short version
 
-| Question | Answer |
-| --- | --- |
-| What is implemented? | Raft roles and terms, `RequestVote`, `AppendEntries`, log reconciliation, majority commit, restart replay, and a deterministic key-value state machine. |
-| Why five nodes? | A majority of three can continue after two crash-stop failures, although requests may fail during elections. |
-| How are reads linearizable? | Every successful `GET` first commits a no-op barrier, proving the leader still reaches a majority in its term. |
-| What is persisted? | Current term, vote, complete replicated log, and commit index. |
-| How is it tested? | Race tests, a real five-server integration test, quorum-loss and conflicting-log tests, Docker leader crashes, and concurrent benchmarks. |
-| What is observable? | Role, term, commit progress, elections, proposals, HTTP traffic, and peer RPC outcomes through Prometheus and Grafana. |
+- Five Go processes elect one leader with `RequestVote` RPCs.
+- Writes are ordered and replicated with `AppendEntries`.
+- A quorum of three must persist an entry before it is committed.
+- `GET` requests use a committed no-op barrier for linearizable reads.
+- Terms, votes, logs, and commit progress survive process restarts.
+- Prometheus, Grafana, fault scripts, and a concurrent benchmark make the
+  cluster's behavior visible and reproducible.
 
-### Evidence ledger
+The current version is an educational Raft implementation, not a production
+database. It deliberately leaves out snapshotting, log compaction, dynamic
+membership, authenticated peer traffic, and horizontal sharding.
 
-| Claim | Evidence |
-| --- | --- |
-| Exactly one leader emerges and committed values replicate | [`TestFiveNodeClusterElectsLeaderReplicatesAndFailsOver`](internal/raft/node_test.go) |
-| Two remaining nodes cannot commit | Quorum-loss phase of the five-node race test |
-| Conflicting follower suffixes are replaced | `TestAppendEntriesReplacesConflictingSuffix` |
-| Committed state survives restart | `TestNodeReplaysCommittedLogOnRestart` plus the Docker catch-up demo |
-| Metrics represent real consensus activity | `TestMetricsTrackLeadershipProposalAndHTTP` and the provisioned dashboard |
-| Performance and failover claims are reproducible | [Recorded results](docs/results/2026-08-15-five-node.md) and scripts in [`scripts`](scripts) |
-
-## System at a glance
+## Architecture
 
 ```mermaid
 flowchart LR
-    C["Client"] -->|"PUT, GET, DELETE"| A["Any node"]
-    A -->|"one-hop forwarding"| L["Elected leader"]
+    C["Client"] -->|"PUT, GET, or DELETE"| A["Any node"]
+    A -->|"forward if needed"| L["Elected leader"]
 
     subgraph R["Five-node Raft group"]
         L -->|"AppendEntries"| F1["Follower 1"]
         L -->|"AppendEntries"| F2["Follower 2"]
         L -->|"AppendEntries"| F3["Follower 3"]
         L -->|"AppendEntries"| F4["Follower 4"]
-        F1 -->|"persisted ack"| L
-        F2 -->|"persisted ack"| L
+        F1 -->|"persisted"| L
+        F2 -->|"persisted"| L
     end
 
-    L -->|"three copies: commit"| S["Deterministic KV state machine"]
+    L -->|"quorum reached"| S["KV state machine"]
     L --> M["Prometheus"]
     F1 --> M
     F2 --> M
     F3 --> M
     F4 --> M
-    M --> G["Grafana dashboard"]
+    M --> G["Grafana"]
 ```
 
-The leader acknowledges a write only after the entry is persisted by a majority
-and applied locally. Followers receive the new commit index in a subsequent
-heartbeat and apply the same command in log order.
+### What happens during a write
 
-See the [diagram gallery](docs/diagrams.md), [system design](docs/architecture.md),
-and [codebase guide](docs/codebase.md) for deeper walkthroughs.
+1. A client sends a `PUT` or `DELETE` to any node.
+2. A follower forwards the request to the leader.
+3. The leader appends the command to its log and persists it.
+4. Followers receive the entry through `AppendEntries` and persist their copies.
+5. Once three nodes have the entry, the leader advances its commit index.
+6. Every node applies committed commands to the same deterministic state machine.
 
-## Measured results
+The client only receives success after the leader has committed and applied the
+command. If leadership changes at the wrong moment, the client may receive a
+503 or lose the connection even though the command later commits. That is why
+the API does not pretend retries are exactly once.
 
-Recorded on an Apple M1 Pro using the five-node Docker topology published at
-commit `385bb88`:
+For deeper diagrams, including elections and recovery, see the
+[diagram gallery](docs/diagrams.md).
 
-| Experiment | Successful operations | Errors | Throughput | p95 |
+## Results from my test environment
+
+These runs used the published five-node Docker topology on an Apple M1 Pro.
+
+| Experiment | Successful operations | Errors | Throughput | p95 latency |
 | --- | ---: | ---: | ---: | ---: |
 | 50/50 PUT and linearizable GET through a follower | 4,174 | 0 | 278.23 ops/s | 203.79 ms |
-| Write load with leader stopped after 5 seconds | 2,858 | 1,395 | 190.50 ops/s | 165.89 ms |
+| Writes while the leader was stopped after 5 seconds | 2,858 | 1,395 | 190.50 ops/s | 165.89 ms |
 
-The no-load leader replacement completed in **763 ms**. Under 32-client write
-load, replacement took **2.144 seconds**; requests observed 1,363 HTTP 503s and
-32 transport failures during the transition. After the stopped node restarted,
-Prometheus reported one leader and zero commit-index lag across all five nodes.
+Without load, the cluster elected a replacement leader in **763 ms**. During
+the 32-client write test, replacement took **2.144 seconds** and clients saw
+1,363 HTTP 503 responses plus 32 transport failures. After the old leader
+restarted, all five nodes returned to zero commit-index lag.
 
-These results demonstrate safety and eventual recovery, not uninterrupted
-availability or production storage performance. Full methodology and limitations
-are in the [results report](docs/results/2026-08-15-five-node.md).
+Those failure numbers are part of the result, not something I hid from the
+report. Raft preserved safety and recovered, but it did not provide uninterrupted
+availability during the election. The exact commands, environment, and raw
+interpretation are in the
+[benchmark report](docs/results/2026-08-15-five-node.md).
 
-## Run the complete topology
+## Run it locally
 
-Requirements: Docker with Compose.
+You only need Docker with Compose:
 
 ```bash
 docker compose up --detach --build
 ```
 
-This starts five Raft nodes, Prometheus, and Grafana. Nodes are exposed on ports
-`8081` through `8085`; send a request to any node:
+That starts five Raft nodes, Prometheus, and Grafana. The nodes are available on
+ports `8081` through `8085`, so any of these requests can go to any node:
 
 ```bash
 curl -i -X PUT http://127.0.0.1:8081/v1/kv/language \
@@ -108,11 +109,12 @@ curl -i http://127.0.0.1:8084/v1/kv/language
 curl -i -X DELETE http://127.0.0.1:8082/v1/kv/language
 ```
 
-Open Prometheus at <http://127.0.0.1:9090> and the provisioned Grafana dashboard
-at <http://127.0.0.1:3000>. The [operations guide](docs/operations.md) covers
-status inspection, load tests, leader failure, restart catch-up, and shutdown.
+Open Prometheus at <http://127.0.0.1:9090> and Grafana at
+<http://127.0.0.1:3000>. The dashboard is provisioned automatically.
 
-## Reproduce the experiments
+## Break it on purpose
+
+The most useful part of the project is watching it behave under failure:
 
 ```bash
 ./scripts/benchmark.sh
@@ -120,60 +122,78 @@ status inspection, load tests, leader failure, restart catch-up, and shutdown.
 ./scripts/failover-load.sh
 ```
 
-The benchmark accepts `mixed`, `write`, and `read` workloads and records keyspace,
-value size, successful throughput, error rate, error categories, and p50/p95/p99.
+The benchmark supports mixed, write-only, and read-only workloads. The failover
+scripts stop the elected leader, time the replacement election, write through
+the new leader, restart the old one, and wait for it to catch up.
+
+The [operations guide](docs/operations.md) includes inspection commands and a
+clean shutdown procedure.
 
 ## API
 
-| Method | Path | Behavior |
+| Method | Path | What it does |
 | --- | --- | --- |
-| `PUT` | `/v1/kv/{key}` | Persist, replicate, and commit a value |
-| `GET` | `/v1/kv/{key}` | Commit a read barrier, then read the state machine |
-| `DELETE` | `/v1/kv/{key}` | Persist, replicate, and commit a deletion |
-| `GET` | `/v1/status` | Return role, term, leader, and log progress |
-| `GET` | `/healthz` | Return process liveness and current Raft identity |
-| `GET` | `/metrics` | Export Prometheus process, HTTP, and Raft metrics |
+| `PUT` | `/v1/kv/{key}` | Replicates and commits a value |
+| `GET` | `/v1/kv/{key}` | Commits a read barrier, then reads the state machine |
+| `DELETE` | `/v1/kv/{key}` | Replicates and commits a deletion |
+| `GET` | `/v1/status` | Shows role, term, leader, and log progress |
+| `GET` | `/healthz` | Reports process liveness and Raft identity |
+| `GET` | `/metrics` | Exports process, HTTP, and Raft metrics |
 
-The `/internal/raft/*` endpoints carry peer RPCs and must remain on a trusted
-cluster network. See [client semantics](docs/client-semantics.md) before adding
-automatic retries: a timeout can have an unknown commit outcome.
+Peer RPCs live under `/internal/raft/*` and are intended for the trusted cluster
+network. The [client semantics guide](docs/client-semantics.md) explains success,
+timeouts, 503s, and safe retry behavior.
 
-## Verify locally
+## How I tested it
 
 ```bash
 make verify
 ```
 
-This runs the race detector, unit and five-node integration tests, vet, both
-binary builds, formatting checks, Compose validation, and diff checks. CI also
-validates shell scripts and the Grafana dashboard JSON.
+The verification target runs the race detector, unit tests, the real five-node
+integration test, `go vet`, both binary builds, formatting checks, and Docker
+Compose validation. The test suite covers:
 
-## Documentation map
+- election and replacement of a failed leader;
+- writes submitted through followers;
+- quorum loss preventing commits;
+- repair of conflicting follower logs;
+- restart replay and persistent catch-up; and
+- consensus, HTTP, and process metrics.
 
-| Start here | What it answers |
-| --- | --- |
-| [Reviewer project overview](docs/project-overview.md) | What is technically interesting and what evidence exists |
-| [Diagram gallery](docs/diagrams.md) | How writes, elections, quorums, and recovery fit together |
-| [System design](docs/architecture.md) | Consensus invariants, read safety, persistence, and failure behavior |
-| [Client semantics](docs/client-semantics.md) | What success, 503, timeout, and retry mean |
-| [Operations](docs/operations.md) | How to run, observe, benchmark, and inject faults |
-| [Recorded results](docs/results/2026-08-15-five-node.md) | Exact environment, workloads, numbers, and limitations |
-| [Codebase guide](docs/codebase.md) | Where each responsibility lives in the repository |
-| [Roadmap](docs/roadmap.md) | Completed milestones and explicit production gaps |
+CI also checks the shell scripts and Grafana dashboard JSON.
 
-## Honest limitations
+## Finding your way around
 
-- Persistence rewrites and `fsync`s the complete JSON log for every safety-critical
-  change; there is no segmented WAL, checksum, batching, or snapshot compaction.
-- The file is atomically renamed, but the parent directory is not explicitly
-  `fsync`ed; crash-consistency claims are therefore limited.
-- Membership is static, peer HTTP is unauthenticated, and the failure model is
-  crash-stop or network loss rather than Byzantine behavior.
-- Reads append log barriers instead of using an optimized `ReadIndex` protocol.
-- Clients can observe 503s during elections and need deadline-aware backoff.
-  There is no request-ID deduplication or exactly-once operation guarantee.
-- One Raft group serializes all writes; horizontal write scaling would require
-  sharding or Multi-Raft.
+```text
+cmd/kvnode/            Server entrypoint and configuration
+cmd/kvbench/           Concurrent benchmark client
+internal/raft/         Elections, replication, persistence, HTTP, and metrics
+internal/statemachine/ Deterministic PUT and DELETE application
+deploy/                Prometheus and Grafana configuration
+scripts/               Benchmark and fault-injection helpers
+docs/                  Design notes, diagrams, operations, and results
+```
+
+Useful next reads:
+
+- [Architecture](docs/architecture.md) for the consensus invariants and storage design
+- [Codebase guide](docs/codebase.md) for how the packages fit together
+- [Client semantics](docs/client-semantics.md) before adding automatic retries
+- [Recorded results](docs/results/2026-08-15-five-node.md) for the full methodology
+- [Roadmap](docs/roadmap.md) for completed work and future milestones
+
+## Tradeoffs and next steps
+
+- Persistence currently rewrites and `fsync`s the full JSON state on every
+  safety-critical change. A real storage engine would use a checksummed,
+  segmented WAL plus snapshots and compaction.
+- Cluster membership is static, and peer HTTP traffic is unauthenticated.
+- Reads use log barriers instead of an optimized `ReadIndex` path.
+- There is no request-ID deduplication, so automatic retries cannot guarantee
+  exactly-once operations.
+- A single Raft group serializes every write. Scaling write throughput would
+  require sharding or Multi-Raft rather than simply adding more followers.
 
 ## License
 
