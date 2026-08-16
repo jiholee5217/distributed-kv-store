@@ -30,6 +30,7 @@ type Config struct {
 	HeartbeatInterval  time.Duration
 	RPCTimeout         time.Duration
 	ForwardTimeout     time.Duration
+	Metrics            *Metrics
 }
 
 // Node owns the Raft consensus state and deterministic key-value state
@@ -44,6 +45,7 @@ type Node struct {
 	machine       *statemachine.Machine
 	rpcClient     *http.Client
 	forwardClient *http.Client
+	metrics       *Metrics
 
 	role          Role
 	currentTerm   uint64
@@ -141,6 +143,7 @@ func NewNode(config Config) (*Node, error) {
 		machine:       machine,
 		rpcClient:     &http.Client{Timeout: config.RPCTimeout},
 		forwardClient: &http.Client{Timeout: config.ForwardTimeout},
+		metrics:       config.Metrics,
 		role:          Follower,
 		currentTerm:   persistent.CurrentTerm,
 		votedFor:      persistent.VotedFor,
@@ -156,6 +159,7 @@ func NewNode(config Config) (*Node, error) {
 		doneCh:        make(chan struct{}),
 	}
 	node.resetElectionDeadlineLocked()
+	node.updateMetricsLocked()
 	return node, nil
 }
 
@@ -249,7 +253,11 @@ func (n *Node) IsLeader() bool {
 
 func (n *Node) Get(key string) (string, bool) { return n.machine.Get(key) }
 
-func (n *Node) Propose(ctx context.Context, command statemachine.Command) (uint64, uint64, error) {
+func (n *Node) Propose(ctx context.Context, command statemachine.Command) (index uint64, term uint64, err error) {
+	started := time.Now()
+	defer func() {
+		n.metrics.observeProposal(string(command.Operation), proposalOutcome(err), time.Since(started))
+	}()
 	select {
 	case <-n.stopCh:
 		return 0, 0, ErrStopped
@@ -272,14 +280,16 @@ func (n *Node) Propose(ctx context.Context, command statemachine.Command) (uint6
 	if err := n.persistLocked(); err != nil {
 		n.log = n.log[:len(n.log)-1]
 		n.lastError = err.Error()
+		n.updateMetricsLocked()
 		term := n.currentTerm
 		n.mu.Unlock()
 		return 0, term, err
 	}
+	n.updateMetricsLocked()
 	if len(n.members) == 1 {
 		n.advanceCommitLocked()
 	}
-	term := n.currentTerm
+	term = n.currentTerm
 	n.mu.Unlock()
 
 	n.requestReplication()
@@ -317,12 +327,17 @@ func (n *Node) startElection() {
 	n.votedFor = n.id
 	n.leaderID = ""
 	n.resetElectionDeadlineLocked()
+	if n.metrics != nil {
+		n.metrics.elections.Inc()
+	}
+	n.updateMetricsLocked()
 	term := n.currentTerm
 	lastIndex := n.lastLogIndexLocked()
 	lastTerm := n.log[lastIndex].Term
 	if err := n.persistLocked(); err != nil {
 		n.lastError = err.Error()
 		n.role = Follower
+		n.updateMetricsLocked()
 		n.mu.Unlock()
 		return
 	}
@@ -421,11 +436,16 @@ func (n *Node) becomeLeaderLocked() bool {
 		n.role = Follower
 		n.leaderID = ""
 		n.lastError = err.Error()
+		n.updateMetricsLocked()
 		return false
 	}
 	if len(n.members) == 1 {
 		n.advanceCommitLocked()
 	}
+	if n.metrics != nil {
+		n.metrics.leadershipChanges.Inc()
+	}
+	n.updateMetricsLocked()
 	slog.Info("Raft leader elected", "node", n.id, "term", n.currentTerm)
 	return true
 }
@@ -439,11 +459,13 @@ func (n *Node) becomeFollowerLocked(term uint64, leaderID string) {
 	n.leaderID = leaderID
 	n.replicating = false
 	n.resetElectionDeadlineLocked()
+	n.updateMetricsLocked()
 }
 
 func (n *Node) HandleRequestVote(request RequestVoteRequest) (RequestVoteResponse, error) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
+	defer n.updateMetricsLocked()
 
 	if request.Term < n.currentTerm {
 		return RequestVoteResponse{Term: n.currentTerm}, nil
@@ -476,6 +498,7 @@ func (n *Node) HandleRequestVote(request RequestVoteRequest) (RequestVoteRespons
 func (n *Node) HandleAppendEntries(request AppendEntriesRequest) (AppendEntriesResponse, error) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
+	defer n.updateMetricsLocked()
 
 	if request.Term < n.currentTerm {
 		return AppendEntriesResponse{Term: n.currentTerm}, nil
@@ -641,9 +664,11 @@ func (n *Node) advanceCommitLocked() {
 		if err := n.persistLocked(); err != nil {
 			n.commitIndex = previous
 			n.lastError = err.Error()
+			n.updateMetricsLocked()
 			return
 		}
 		n.applyCommittedLocked()
+		n.updateMetricsLocked()
 		return
 	}
 }
@@ -656,21 +681,30 @@ func (n *Node) applyCommittedLocked() {
 			return
 		}
 	}
+	n.updateMetricsLocked()
 }
 
 func (n *Node) sendRequestVote(member Member, request RequestVoteRequest) (RequestVoteResponse, error) {
 	var response RequestVoteResponse
-	err := n.postJSON(member.URL+"/internal/raft/request-vote", request, &response)
+	err := n.postJSON("request_vote", member, member.URL+"/internal/raft/request-vote", request, &response)
 	return response, err
 }
 
 func (n *Node) sendAppendEntries(member Member, request AppendEntriesRequest) (AppendEntriesResponse, error) {
 	var response AppendEntriesResponse
-	err := n.postJSON(member.URL+"/internal/raft/append-entries", request, &response)
+	err := n.postJSON("append_entries", member, member.URL+"/internal/raft/append-entries", request, &response)
 	return response, err
 }
 
-func (n *Node) postJSON(endpoint string, payload, destination any) error {
+func (n *Node) postJSON(rpc string, member Member, endpoint string, payload, destination any) (err error) {
+	started := time.Now()
+	outcome := "success"
+	defer func() {
+		if err != nil && outcome == "success" {
+			outcome = "error"
+		}
+		n.metrics.observePeerRPC(rpc, member.ID, outcome, time.Since(started))
+	}()
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return err
@@ -682,14 +716,17 @@ func (n *Node) postJSON(endpoint string, payload, destination any) error {
 	request.Header.Set("Content-Type", "application/json")
 	response, err := n.rpcClient.Do(request)
 	if err != nil {
+		outcome = "transport_error"
 		return err
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
+		outcome = fmt.Sprintf("http_%d", response.StatusCode)
 		io.Copy(io.Discard, response.Body)
 		return fmt.Errorf("Raft peer returned %s", response.Status)
 	}
 	if err := json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(destination); err != nil {
+		outcome = "decode_error"
 		return err
 	}
 	return nil
@@ -715,6 +752,28 @@ func (n *Node) resetElectionDeadlineLocked() {
 		delay += time.Duration(rand.Int64N(int64(spread)))
 	}
 	n.electionDue = time.Now().Add(delay)
+}
+
+func (n *Node) updateMetricsLocked() {
+	if n.metrics == nil || len(n.log) == 0 {
+		return
+	}
+	n.metrics.setState(n.role, n.currentTerm, n.commitIndex, n.lastApplied, n.lastLogIndexLocked())
+}
+
+func proposalOutcome(err error) string {
+	switch {
+	case err == nil:
+		return "committed"
+	case errors.Is(err, ErrNotLeader):
+		return "not_leader"
+	case errors.Is(err, ErrStopped):
+		return "stopped"
+	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
+		return "deadline"
+	default:
+		return "error"
+	}
 }
 
 func (n *Node) leaderLocation() (string, string) {

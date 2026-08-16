@@ -24,6 +24,7 @@ elect a leader and commit a log entry.
 | Docker Compose | Run an isolated five-node network with one volume per node |
 | Benchmark client | Generate concurrent traffic and calculate latency percentiles |
 | Fault demo | Stop the elected leader and measure replacement-election time |
+| Prometheus/Grafana | Expose roles, terms, commit progress, proposal latency, elections, HTTP traffic, and peer RPC outcomes |
 
 ## Write path
 
@@ -116,6 +117,11 @@ renames it over the previous file. On restart the node validates log indexes and
 replays every entry through the persisted commit index. Uncommitted suffixes
 remain in the log and are reconciled by the next leader.
 
+The parent directory is not explicitly `fsync`ed after rename. The approach is
+stronger than an in-place overwrite and is appropriate for this baseline, but it
+does not justify a fully crash-hardened WAL claim. The roadmap includes explicit
+crash-point tests and checksummed records.
+
 Rewriting the full log is intentionally transparent but eventually expensive.
 A segmented checksummed WAL plus periodic snapshots is the intended next
 storage layer.
@@ -125,13 +131,34 @@ storage layer.
 | Live, mutually reachable nodes | Expected behavior |
 | --- | --- |
 | 5 | Normal operation |
-| 4 | Normal operation after any one crash |
-| 3 | Still able to elect and commit |
+| 4 | Can elect and commit after an election window |
+| 3 | Still able to elect and commit after an election window |
 | 2 or fewer | No writes or linearizable reads; majority unavailable |
 
 During leader failure there is a short period with no leader. Requests return
 `503 Service Unavailable` until an election completes. Followers then learn the
 replacement leader from heartbeats and resume forwarding.
+
+A lost connection has an unknown outcome: a command may have committed before
+the response was lost. See [client semantics](client-semantics.md) for retry
+guidance and the [results report](results/2026-08-15-five-node.md) for observed
+no-load and under-load election windows.
+
+## Observability
+
+Each node exports `/metrics` with constant node labels and bounded route, peer,
+operation, role, status, and outcome labels. No key or value becomes a metric
+label. The dashboard covers:
+
+- active leader count and terms;
+- commit-index lag and log growth;
+- committed proposal p95 latency;
+- election attempts and leadership changes;
+- client HTTP rate and status codes; and
+- peer RPC latency and failures.
+
+Metrics are operational observations rather than consensus state; they are not
+replicated and may reset on process restart.
 
 ## Trust boundaries and limitations
 
@@ -140,5 +167,6 @@ replacement leader from heartbeats and resume forwarding.
 - The failure model is crash-stop or network loss, not Byzantine behavior.
 - There is no snapshot installation, log compaction, or dynamic membership.
 - Forwarding is one hop and guarded against loops.
+- `/healthz` is process liveness, not proof of majority readiness.
 - Performance results must include the machine, Docker version, workload,
   commit, duration, and raw benchmark output.

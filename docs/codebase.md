@@ -10,13 +10,17 @@
 │   │   ├── node.go           # Elections, replication, commits, recovery
 │   │   ├── http.go           # Client API, forwarding, and Raft RPC handlers
 │   │   ├── storage.go        # File and in-memory persistent-state backends
+│   │   ├── metrics.go        # Bounded-cardinality Prometheus instrumentation
 │   │   ├── types.go          # Log, RPC, member, role, and status types
 │   │   └── *_test.go         # Safety, persistence, and five-node tests
 │   └── statemachine/
 │       └── machine.go        # Deterministic committed key-value state
 ├── scripts/
-│   └── failover-demo.sh      # Leader crash and recovery measurement
-├── docker-compose.yml        # Five nodes and five durable volumes
+│   ├── benchmark.sh          # Reproducible steady workload
+│   ├── failover-demo.sh      # Leader crash, write, restart, and catch-up
+│   └── failover-load.sh      # Sustained writes during leader failure
+├── deploy/                   # Prometheus and Grafana provisioning
+├── docker-compose.yml        # Five nodes, five volumes, metrics, and dashboard
 ├── Dockerfile                # Minimal production node image
 └── docs/
     ├── architecture.md       # Protocol and system-design decisions
@@ -28,8 +32,9 @@
 ### `cmd/kvnode`
 
 Parses node identity, address, static membership, timer, and data-directory
-flags. It creates file-backed storage, constructs the Raft node, starts its
-timers, and manages graceful HTTP shutdown.
+flags. It creates file-backed storage and a private Prometheus registry,
+constructs the Raft node, exposes `/metrics`, starts timers, and manages graceful
+HTTP shutdown.
 
 ### `internal/raft/node.go`
 
@@ -67,6 +72,11 @@ same committed log reaches the same key-value state.
 
 The integration test launches five real HTTP servers, waits for one leader,
 writes through a follower, verifies replication, kills the leader, waits for a
-replacement, and writes again. Docker Compose provides the human-observable
-version of that topology. The benchmark and failover script produce measured
-evidence rather than hard-coded résumé claims.
+replacement, writes again, then removes enough nodes to prove a minority cannot
+advance the commit index. Focused tests cover stale voting, conflicting suffix
+repair, restart replay, persistence, state-machine behavior, and metric updates.
+
+Docker Compose provides the human-observable topology. The benchmark records
+workload shape, successes, error categories, throughput, and percentiles. The
+failure scripts measure both correctness-oriented restart catch-up and request
+behavior during an under-load election.

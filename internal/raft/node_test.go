@@ -2,7 +2,9 @@ package raft
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -81,6 +83,34 @@ func TestFiveNodeClusterElectsLeaderReplicatesAndFailsOver(t *testing.T) {
 	if got := getValue(t, servers[newLeader].URL, "project", http.StatusOK); got != "failover" {
 		t.Fatalf("GET after failover = %q; want failover", got)
 	}
+
+	// Remove two additional nodes, leaving only two of the original five.
+	// The isolated leader may append locally, but it must not commit without a
+	// majority of three.
+	removed := 0
+	for index, node := range nodes {
+		if node == nil || index == newLeader || removed == 2 {
+			continue
+		}
+		node.Close()
+		nodes[index] = nil
+		servers[index].Close()
+		removed++
+	}
+	before := nodes[newLeader].Status().CommitIndex
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	_, _, err := nodes[newLeader].Propose(ctx, statemachine.Command{
+		Operation: statemachine.OperationPut,
+		Key:       "minority",
+		Value:     "must-not-commit",
+	})
+	if !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, ErrNotLeader) {
+		t.Fatalf("minority proposal error = %v; want deadline or leadership loss", err)
+	}
+	if after := nodes[newLeader].Status().CommitIndex; after != before {
+		t.Fatalf("minority advanced commit index from %d to %d", before, after)
+	}
 }
 
 func TestNodeReplaysCommittedLogOnRestart(t *testing.T) {
@@ -154,6 +184,55 @@ func TestRequestVoteRejectsStaleCandidate(t *testing.T) {
 	}
 	if response.VoteGranted {
 		t.Fatal("node granted a vote to a candidate with a stale log")
+	}
+}
+
+func TestAppendEntriesReplacesConflictingSuffix(t *testing.T) {
+	node, err := NewNode(Config{
+		ID: "follower",
+		Members: []Member{
+			{ID: "follower", URL: "http://follower"},
+			{ID: "leader", URL: "http://leader"},
+			{ID: "third", URL: "http://third"},
+		},
+		Storage: NewMemoryStorage(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	node.mu.Lock()
+	node.currentTerm = 3
+	node.log = append(node.log,
+		Entry{Index: 1, Term: 1, Command: statemachine.Command{Operation: statemachine.OperationPut, Key: "stable", Value: "yes"}},
+		Entry{Index: 2, Term: 2, Command: statemachine.Command{Operation: statemachine.OperationPut, Key: "stale", Value: "old"}},
+	)
+	if err := node.persistLocked(); err != nil {
+		t.Fatal(err)
+	}
+	node.mu.Unlock()
+
+	response, err := node.HandleAppendEntries(AppendEntriesRequest{
+		Term:         3,
+		LeaderID:     "leader",
+		PrevLogIndex: 1,
+		PrevLogTerm:  1,
+		Entries: []Entry{{
+			Index:   2,
+			Term:    3,
+			Command: statemachine.Command{Operation: statemachine.OperationPut, Key: "current", Value: "new"},
+		}},
+		LeaderCommit: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !response.Success || response.MatchIndex != 2 {
+		t.Fatalf("AppendEntries response = %+v", response)
+	}
+	node.mu.Lock()
+	defer node.mu.Unlock()
+	if len(node.log) != 3 || node.log[2].Term != 3 || node.log[2].Command.Key != "current" {
+		t.Fatalf("conflicting suffix was not replaced: %+v", node.log)
 	}
 }
 
