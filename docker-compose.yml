@@ -61,6 +61,29 @@ services:
     ports: ["8085:8080"]
     volumes: [node-5-data:/data]
 
+  prometheus:
+    image: prom/prometheus:v3.8.1
+    restart: unless-stopped
+    depends_on: [node-1, node-2, node-3, node-4, node-5]
+    command: ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.path=/prometheus"]
+    volumes: ["./deploy/prometheus.yml:/etc/prometheus/prometheus.yml:ro"]
+    ports: ["9090:9090"]
+    networks: [raft]
+
+  grafana:
+    image: grafana/grafana:12.3.3
+    restart: unless-stopped
+    depends_on: [prometheus]
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+    volumes:
+      - "./deploy/grafana/provisioning:/etc/grafana/provisioning:ro"
+      - "./deploy/grafana/dashboards:/var/lib/grafana/dashboards:ro"
+    ports: ["3000:3000"]
+    networks: [raft]
+
 networks:
   raft:
 

@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/jiholee5217/distributed-kv-store/internal/statemachine"
 )
@@ -16,14 +17,50 @@ const maxRequestBody = 1 << 20
 
 func (n *Node) Handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", n.handleHealth)
-	mux.HandleFunc("GET /v1/status", n.handleStatus)
-	mux.HandleFunc("GET /v1/kv/{key}", n.handleGet)
-	mux.HandleFunc("PUT /v1/kv/{key}", n.handlePut)
-	mux.HandleFunc("DELETE /v1/kv/{key}", n.handleDelete)
-	mux.HandleFunc("POST /internal/raft/request-vote", n.handleRequestVote)
-	mux.HandleFunc("POST /internal/raft/append-entries", n.handleAppendEntries)
+	mux.HandleFunc("GET /healthz", n.instrumentHTTP("/healthz", n.handleHealth))
+	mux.HandleFunc("GET /v1/status", n.instrumentHTTP("/v1/status", n.handleStatus))
+	mux.HandleFunc("GET /v1/kv/{key}", n.instrumentHTTP("/v1/kv/{key}", n.handleGet))
+	mux.HandleFunc("PUT /v1/kv/{key}", n.instrumentHTTP("/v1/kv/{key}", n.handlePut))
+	mux.HandleFunc("DELETE /v1/kv/{key}", n.instrumentHTTP("/v1/kv/{key}", n.handleDelete))
+	mux.HandleFunc("POST /internal/raft/request-vote", n.instrumentHTTP("/internal/raft/request-vote", n.handleRequestVote))
+	mux.HandleFunc("POST /internal/raft/append-entries", n.instrumentHTTP("/internal/raft/append-entries", n.handleAppendEntries))
 	return mux
+}
+
+type responseStatusWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (w *responseStatusWriter) WriteHeader(status int) {
+	if w.status != 0 {
+		return
+	}
+	w.status = status
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *responseStatusWriter) Write(body []byte) (int, error) {
+	if w.status == 0 {
+		w.WriteHeader(http.StatusOK)
+	}
+	return w.ResponseWriter.Write(body)
+}
+
+func (n *Node) instrumentHTTP(route string, handler http.HandlerFunc) http.HandlerFunc {
+	if n.metrics == nil {
+		return handler
+	}
+	return func(writer http.ResponseWriter, request *http.Request) {
+		started := time.Now()
+		recorder := &responseStatusWriter{ResponseWriter: writer}
+		handler(recorder, request)
+		status := recorder.status
+		if status == 0 {
+			status = http.StatusOK
+		}
+		n.metrics.observeHTTP(route, request.Method, status, time.Since(started))
+	}
 }
 
 func (n *Node) handleHealth(w http.ResponseWriter, _ *http.Request) {

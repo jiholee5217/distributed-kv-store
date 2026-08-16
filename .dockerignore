@@ -1,6 +1,9 @@
 .git
 .github
+.DS_Store
 bin
 data
-kvnode
-*.out
+docs
+*.md
+coverage.out
+deploy/grafana

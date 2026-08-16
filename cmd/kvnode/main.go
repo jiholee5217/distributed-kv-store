@@ -17,6 +17,9 @@ import (
 	"time"
 
 	"github.com/jiholee5217/distributed-kv-store/internal/raft"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/collectors"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 func main() {
@@ -48,6 +51,9 @@ func main() {
 	if err != nil {
 		exit(err)
 	}
+	metricsRegistry := prometheus.NewRegistry()
+	metricsRegistry.MustRegister(collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
+	metrics := raft.NewMetrics(metricsRegistry, *id)
 	node, err := raft.NewNode(raft.Config{
 		ID:                 *id,
 		Members:            members,
@@ -57,6 +63,7 @@ func main() {
 		HeartbeatInterval:  *heartbeat,
 		RPCTimeout:         *rpcTimeout,
 		ForwardTimeout:     *forwardTimeout,
+		Metrics:            metrics,
 	})
 	if err != nil {
 		exit(err)
@@ -66,8 +73,11 @@ func main() {
 	if err != nil {
 		exit(err)
 	}
+	rootMux := http.NewServeMux()
+	rootMux.Handle("GET /metrics", promhttp.HandlerFor(metricsRegistry, promhttp.HandlerOpts{}))
+	rootMux.Handle("/", node.Handler())
 	server := &http.Server{
-		Handler:           node.Handler(),
+		Handler:           rootMux,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	node.Start()

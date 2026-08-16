@@ -25,5 +25,9 @@ jobs:
         run: go test -race ./...
       - name: Build
         run: go build ./...
+      - name: Validate operational assets
+        run: |
+          bash -n scripts/*.sh scripts/lib/*.sh
+          python3 -m json.tool deploy/grafana/dashboards/raft.json >/dev/null
       - name: Validate Docker Compose
         run: docker compose config --quiet

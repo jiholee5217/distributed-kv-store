@@ -1,0 +1,63 @@
+{
+  "annotations": {"list": []},
+  "editable": true,
+  "panels": [
+    {
+      "type": "stat",
+      "title": "Active leaders",
+      "targets": [{"expr": "sum(raft_kv_node_role{role=\"leader\"})", "legendFormat": "leaders"}],
+      "gridPos": {"h": 6, "w": 6, "x": 0, "y": 0}
+    },
+    {
+      "type": "timeseries",
+      "title": "Term by node",
+      "targets": [{"expr": "raft_kv_node_term", "legendFormat": "{{node}}"}],
+      "gridPos": {"h": 6, "w": 9, "x": 6, "y": 0}
+    },
+    {
+      "type": "timeseries",
+      "title": "Commit-index lag",
+      "targets": [{"expr": "max(raft_kv_node_commit_index) - raft_kv_node_commit_index", "legendFormat": "{{node}}"}],
+      "gridPos": {"h": 6, "w": 9, "x": 15, "y": 0}
+    },
+    {
+      "type": "timeseries",
+      "title": "Client request rate",
+      "targets": [{"expr": "sum by (method, status) (rate(raft_kv_http_requests_total{route=\"/v1/kv/{key}\"}[1m]))", "legendFormat": "{{method}} {{status}}"}],
+      "gridPos": {"h": 8, "w": 8, "x": 0, "y": 6}
+    },
+    {
+      "type": "timeseries",
+      "title": "Committed proposal p95",
+      "targets": [{"expr": "histogram_quantile(0.95, sum by (le, node) (rate(raft_kv_node_proposal_duration_seconds_bucket{outcome=\"committed\"}[1m])))", "legendFormat": "{{node}}"}],
+      "gridPos": {"h": 8, "w": 8, "x": 8, "y": 6}
+    },
+    {
+      "type": "timeseries",
+      "title": "Election attempts",
+      "targets": [{"expr": "increase(raft_kv_node_elections_total[5m])", "legendFormat": "{{node}}"}],
+      "gridPos": {"h": 8, "w": 8, "x": 16, "y": 6}
+    },
+    {
+      "type": "timeseries",
+      "title": "Peer RPC failures",
+      "targets": [{"expr": "sum by (node, outcome) (rate(raft_kv_node_peer_rpc_total{outcome!=\"success\"}[1m]))", "legendFormat": "{{node}} {{outcome}}"}],
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 14}
+    },
+    {
+      "type": "timeseries",
+      "title": "Log entries",
+      "targets": [{"expr": "raft_kv_node_log_entries", "legendFormat": "{{node}}"}],
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 14}
+    }
+  ],
+  "refresh": "5s",
+  "schemaVersion": 41,
+  "tags": ["raft", "distributed-systems", "key-value"],
+  "templating": {"list": []},
+  "time": {"from": "now-15m", "to": "now"},
+  "timezone": "browser",
+  "title": "Raft Distributed Key-Value Store",
+  "uid": "raft-distributed-kv-store",
+  "version": 1
+}
