@@ -71,8 +71,8 @@ and [codebase guide](docs/codebase.md) for deeper walkthroughs.
 
 ## Measured results
 
-Recorded on an Apple M1 Pro using the five-node Docker topology at implementation
-commit `78322d0`:
+Recorded on an Apple M1 Pro using the five-node Docker topology published at
+commit `385bb88`:
 
 | Experiment | Successful operations | Errors | Throughput | p95 |
 | --- | ---: | ---: | ---: | ---: |
