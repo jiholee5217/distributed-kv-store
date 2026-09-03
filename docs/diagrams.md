@@ -126,16 +126,19 @@ flowchart LR
 ```mermaid
 flowchart TD
     M["Term, vote, log, commit index"] --> J["Encode complete JSON state"]
-    J --> T["Write temporary file"]
+    J --> H["Wrap with version and SHA-256 checksum"]
+    H --> T["Write temporary file"]
     T --> F["fsync temporary file"]
     F --> R["Atomic rename over prior state"]
-    R --> C["Process crash and restart"]
-    C --> V["Validate sentinel, indexes, and commit bound"]
+    R --> D["fsync parent directory"]
+    D --> C["Process crash and restart"]
+    C --> Q["Verify version and checksum"]
+    Q --> V["Validate sentinel, indexes, and commit bound"]
     V --> A["Replay entries 1 through commit index"]
     A --> K["Reconstructed KV state machine"]
     K --> P["Leader reconciles any uncommitted suffix"]
 ```
 
 The transparent full-state format is easy to study but becomes increasingly
-expensive as the log grows. WAL segmentation, checksums, directory `fsync`, and
-snapshots are explicit future storage milestones.
+expensive as the log grows. WAL segmentation, record-level checksums,
+crash-point tests, and snapshots remain future storage milestones.

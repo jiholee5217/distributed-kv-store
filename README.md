@@ -186,8 +186,9 @@ Useful next reads:
 ## Tradeoffs and next steps
 
 - Persistence currently rewrites and `fsync`s the full JSON state on every
-  safety-critical change. A real storage engine would use a checksummed,
-  segmented WAL plus snapshots and compaction.
+  safety-critical change. The file is versioned, protected by a SHA-256
+  checksum, and durably replaced with file and directory `fsync`; a production
+  storage engine would still use a segmented WAL plus snapshots and compaction.
 - Cluster membership is static, and peer HTTP traffic is unauthenticated.
 - Reads use log barriers instead of an optimized `ReadIndex` path.
 - There is no request-ID deduplication, so automatic retries cannot guarantee

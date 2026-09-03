@@ -17,9 +17,11 @@ honest update to the public claims.
 
 ## Storage durability and bounded growth
 
+- [x] Versioned state envelope with SHA-256 corruption detection and legacy-file loading
+- [x] Parent-directory `fsync` after atomic state-file replacement
 - [ ] Segmented write-ahead log with checksums and explicit record framing
 - [ ] Batched `fsync` with a documented durability/latency policy
-- [ ] Parent-directory `fsync` and crash-point tests around atomic replacement
+- [ ] Crash-point tests around each atomic-replacement boundary
 - [ ] State-machine snapshots and log compaction
 - [ ] `InstallSnapshot` catch-up for followers behind the compacted prefix
 

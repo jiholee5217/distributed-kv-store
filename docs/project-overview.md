@@ -42,7 +42,7 @@ with the current leader.
 | Implement Raft directly | Makes terms, votes, conflicts, and commit rules inspectable | Educational implementation lacks production hardening |
 | Require three of five replicas | Survives two crash-stop failures without divergent commits | Minority partitions reject writes and linearizable reads |
 | Commit a barrier for every GET | Simple proof that the leader still reaches a majority | Reads pay replication and persistence latency and grow the log |
-| Rewrite a JSON state file atomically | Recovery format is easy to inspect and test | Cost rises with every log entry; no WAL checksums or compaction |
+| Rewrite a versioned, checksummed JSON state file atomically | Recovery format is easy to inspect and corruption is detected before replay | Cost rises with every log entry; no segmented WAL or compaction |
 | Forward through any node | Simple client endpoint behavior | Adds a proxy hop and exposes a short 503 window during elections |
 | Export bounded-cardinality metrics | Elections and replication are observable without key-level labels | Metrics do not replace tracing or durable audit events |
 
@@ -54,7 +54,7 @@ with the current leader.
 | A minority cannot commit | Same test removes three nodes and verifies `commitIndex` does not advance |
 | Stale candidates cannot win | `TestRequestVoteRejectsStaleCandidate` |
 | Conflicting suffixes converge | `TestAppendEntriesReplacesConflictingSuffix` |
-| Committed state replays | Memory/file restart tests and Docker restart catch-up demo |
+| Committed state replays | Memory/file restart tests, checksum-corruption tests, legacy-format loading, and Docker restart catch-up demo |
 | Operational signals are exported | Metrics unit test, five Prometheus targets, provisioned Grafana dashboard |
 | Failure cost is measured | No-load and under-load leader-stop experiments with recorded recovery windows |
 

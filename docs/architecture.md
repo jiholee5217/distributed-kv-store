@@ -19,7 +19,7 @@ elect a leader and commit a log entry.
 | HTTP API | Accept client operations and forward follower requests |
 | Raft node | Own terms, roles, votes, timers, log replication, and commit rules |
 | RPC transport | Exchange `RequestVote` and `AppendEntries` messages over HTTP |
-| Persistent storage | Atomically save term, vote, log, and commit index |
+| Persistent storage | Atomically save term, vote, log, and commit index in a checksummed format |
 | State machine | Apply committed `PUT`, `DELETE`, and read-barrier commands |
 | Docker Compose | Run an isolated five-node network with one volume per node |
 | Benchmark client | Generate concurrent traffic and calculate latency percentiles |
@@ -112,15 +112,17 @@ Before acknowledging safety-critical transitions, a node atomically persists:
 - the replicated log; and
 - `commitIndex`.
 
-The implementation writes a temporary JSON state file, calls `fsync`, and
-renames it over the previous file. On restart the node validates log indexes and
-replays every entry through the persisted commit index. Uncommitted suffixes
-remain in the log and are reconciled by the next leader.
+The implementation wraps that state in a versioned JSON envelope with a SHA-256
+checksum. It writes a temporary file, calls `fsync`, renames the file over the
+previous copy, and then `fsync`s the parent directory. On restart it verifies
+the checksum before returning any state to Raft, validates log indexes, and
+replays every entry through the persisted commit index. Files written by the
+earlier unversioned format remain readable and are upgraded on the next save.
+Uncommitted suffixes remain in the log and are reconciled by the next leader.
 
-The parent directory is not explicitly `fsync`ed after rename. The approach is
-stronger than an in-place overwrite and is appropriate for this baseline, but it
-does not justify a fully crash-hardened WAL claim. The roadmap includes explicit
-crash-point tests and checksummed records.
+These boundaries reduce the risk of silent corruption and a lost rename, but
+they do not justify a fully crash-hardened WAL claim. Crash-point tests and
+record-level recovery are still roadmap work.
 
 Rewriting the full log is intentionally transparent but eventually expensive.
 A segmented checksummed WAL plus periodic snapshots is the intended next

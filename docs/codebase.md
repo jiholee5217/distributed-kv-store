@@ -59,8 +59,10 @@ state to observe elections and replication without reading private fields.
 ### `internal/raft/storage.go`
 
 Defines a small `Storage` interface. `FileStorage` is used by real nodes and
-performs atomic durable replacement. `MemoryStorage` makes deterministic tests
-fast without weakening the production path.
+stores a versioned, checksummed envelope through atomic file replacement plus a
+parent-directory `fsync`. It can still load the original unversioned JSON files.
+`MemoryStorage` makes deterministic tests fast without weakening the production
+path.
 
 ### `internal/statemachine`
 
